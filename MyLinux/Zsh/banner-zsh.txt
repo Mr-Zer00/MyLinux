@@ -1,0 +1,70 @@
+:~# nano ~/.zshrc
+
+
+# Set personal aliases, overriding those provided by oh-my-zsh libs,
+# plugins, and themes. Aliases can be placed here, though oh-my-zsh
+# users are encouraged to define aliases within the ZSH_CUSTOM folder.
+# For a full list of active aliases, run `alias`.
+#
+# Example aliases
+# alias zshconfig="mate ~/.zshrc"
+# alias ohmyzsh="mate ~/.oh-my-zsh"
+
+
+
+#echo "                                  ______                         	"
+#echo "	                       .-        -.                      	"
+#echo "	                      /            \				"         
+#echo "	                     |,  .-.  .-.  ,|				"      
+#echo "	                     | )(_ /  \_ )( |				"
+#echo "	                     |/     /\     \|				"   
+#echo "	           (@_       <__    ^^    __>				"        
+#echo "	      _     ) \_______\__|IIIIII|__/____________________	" 
+#echo "	     (_)\@8@8{}<________________________________________>	" 
+#echo "	            )_/         \ IIIIII /                       	"
+#echo "	           (@            --------                      		"
+#echo "									"
+
+#echo "					                   "
+#echo "                                _________-----_____            "
+#echo "                     _____------           __      ----_       "
+#echo "             ___----             ___------              \      "
+#echo "                ----________        ----                 \     "
+#echo "                            -----__    |             _____)    "
+#echo "                                 __-                /#####\    "
+#echo "                     _______-----    ___--          \####/)\   "
+#echo "               ------_______      ---____            \##/  /   "
+#echo "                            -----__    \ --    _      --   /\  "
+#echo "                                   --__--__     \_____/   \_/\ "
+#echo "                                          ----|   /          | "
+#echo "                                              |  |___________| "
+#echo "                                              |  | ((_(_)| )_) "
+#echo "                                              |  \_((_(_)|/(_) "
+#echo "                                              \             (  "
+#echo "                                               \_____________) "
+#echo "                                                               "
+
+#echo "	                                                 	"
+#echo "	                                 ___          ____	"
+#echo "	                              ,-""   `.      < HONK >	"
+#echo "	                            ,'  _   e )`-._ /  ----	"
+#echo "	                           /  ,' `-._<.===-'		"
+#echo "	                          /  /				"
+#echo "	                         /  ;				"
+#echo "	             _          /   ;				"
+#echo "	(`._    _.-"" ""--..__,'    |				"
+#echo "	<_  `-""                     \				"
+#echo "	 <`-                          :				"
+#echo "	  (__   <__.                  ;				"
+#echo "	    `-.   '-.__.      _.'    /				"
+#echo "	       \      `-.__,-'    _,'				"
+#echo "	        `._    ,    /__,-'				"
+#echo "	           ""._\__,'< <____				"
+#echo "	                | |  `----.`.				"
+#echo "	                | |        \ `.				"
+#echo "	                ; |___      \-`				"
+#echo "	                \   --<					"
+#echo "	                 `.`.<					"
+#echo "	                   `-'					"
+#echo "								"
+
