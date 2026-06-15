@@ -2,7 +2,7 @@
 
 Sandbox seguro para executar agentes CLI (como o **Claude Code**) usando **systemd‑nspawn**, adaptado para Debian 13.
 
-Este script é uma adaptação do [waterbox original](https://github.com/morkin1792) criado por **morkin1792**, modificado para funcionar perfeitamente em distribuições baseadas em Debian Trixie (sem necessidade de ajustes manuais pós‑instalação).
+Este script é uma adaptação do [waterbox original](https://github.com/morkin1792) criado por **morkin1792**, modificado para funcionar perfeitamente em distribuições baseadas em Debian (sem necessidade de ajustes manuais pós‑instalação).
 
 ---
 
