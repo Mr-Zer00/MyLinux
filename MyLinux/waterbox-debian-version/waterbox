@@ -1,0 +1,516 @@
+#!/usr/bin/env bash
+
+# Waterbox - sandbox para agentes CLI
+# Adaptado para Debian 13 (Trixie) com debootstrap
+# Versão portátil - sem ajustes manuais pós-instalação
+
+set -e
+
+# --- Configuração ---
+JAIL_ROOT="$HOME/.waterbox/root"
+CONFIG_DIR="$HOME/.waterbox"
+SHARE_LIST="$CONFIG_DIR/shared_paths"
+USER_NAME="water"
+MACHINE_NAME="waterbox"
+INSIDE_HOSTNAME="box"
+TMUX_SESSION="box"
+CONTAINER_WORKSPACE="/home/$USER_NAME/workspace"
+
+HOST_IP="10.20.30.1"
+CONTAINER_IP="10.20.30.2"
+NET_CIDR="24"
+HOST_ALIAS="host"
+VE_IFACE="ve-$MACHINE_NAME"
+
+ALLOW_CONTAINER_TO_HOST_PORTS=true
+DNS_SERVERS=("8.8.8.8" "1.1.1.1")
+
+DEBIAN_RELEASE="trixie"
+DEB_MIRROR="http://deb.debian.org/debian"
+
+mkdir -p "$CONFIG_DIR"
+touch "$SHARE_LIST"
+
+log_info()    { echo -e "\e[34m[INFO]\e[0m $1"; }
+log_success() { echo -e "\e[32m[ OK ]\e[0m $1"; }
+log_warn()    { echo -e "\e[33m[WARN]\e[0m $1"; }
+log_error()   { echo -e "\e[31m[ERR ]\e[0m $1"; exit 1; }
+
+show_help() {
+    cat <<EOF
+Usage: waterbox [command]
+
+Commands:
+  start
+  stop
+  restart
+  status
+  reset
+  share add <path>
+  share del <path>
+  share list
+  help
+EOF
+}
+
+# --- Bootstrap (Debian) ---
+bootstrap_sandbox() {
+    if [ -d "$JAIL_ROOT/usr" ] && [ -f "$JAIL_ROOT/etc/debian_version" ]; then
+        return 0
+    fi
+
+    log_info "Bootstrapping Debian $DEBIAN_RELEASE em $JAIL_ROOT..."
+    sudo mkdir -p "$JAIL_ROOT"
+
+    # debootstrap: sistema mínimo com pacotes iniciais
+    sudo debootstrap --include=systemd,dbus,apt,locales,curl,ca-certificates,gpg,unzip,jq \
+        "$DEBIAN_RELEASE" "$JAIL_ROOT" "$DEB_MIRROR"
+
+    log_info "Instalando pacotes essenciais..."
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" bash -c "
+        apt-get update &&
+        apt-get install -y --no-install-recommends \
+            build-essential git nodejs npm zsh tmux vim-nox \
+            ripgrep less openssh-client netcat-openbsd \
+            sudo coreutils iproute2 iputils-ping \
+            powerline fonts-powerline \
+            zsh-autosuggestions zsh-syntax-highlighting &&
+        # history-substring-search não está no repositório, instalamos via git
+        git clone --depth 1 https://github.com/zsh-users/zsh-history-substring-search.git \
+            /usr/share/zsh-history-substring-search
+    "
+
+    # Configuração básica
+    echo "$INSIDE_HOSTNAME" | sudo tee "$JAIL_ROOT/etc/hostname" > /dev/null
+
+    # DNS fixo
+    sudo rm -f "$JAIL_ROOT/etc/resolv.conf"
+    {
+        for dns in "${DNS_SERVERS[@]}"; do
+            echo "nameserver $dns"
+        done
+    } | sudo tee "$JAIL_ROOT/etc/resolv.conf" > /dev/null
+
+    # /etc/hosts
+    sudo tee -a "$JAIL_ROOT/etc/hosts" > /dev/null <<EOF
+$HOST_IP    $HOST_ALIAS
+EOF
+
+    # Locale
+    echo "en_US.UTF-8 UTF-8" | sudo tee "$JAIL_ROOT/etc/locale.gen" > /dev/null
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" locale-gen
+    echo "LANG=en_US.UTF-8" | sudo tee "$JAIL_ROOT/etc/locale.conf" > /dev/null
+
+    # Usuário
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" \
+        useradd -m -s /usr/bin/zsh -u 1000 "$USER_NAME" 2>/dev/null || true
+    echo "$USER_NAME ALL=(ALL) NOPASSWD: ALL" \
+        | sudo tee "$JAIL_ROOT/etc/sudoers.d/10-$USER_NAME" > /dev/null
+    sudo chmod 0440 "$JAIL_ROOT/etc/sudoers.d/10-$USER_NAME"
+
+    sudo mkdir -p "$JAIL_ROOT$CONTAINER_WORKSPACE"
+    sudo chown -R 1000:1000 "$JAIL_ROOT$CONTAINER_WORKSPACE"
+
+    # Rede estática
+    sudo mkdir -p "$JAIL_ROOT/etc/systemd/network"
+    {
+        echo "[Match]"
+        echo "Name=host0"
+        echo ""
+        echo "[Network]"
+        echo "Address=$CONTAINER_IP/$NET_CIDR"
+        echo "Gateway=$HOST_IP"
+        for dns in "${DNS_SERVERS[@]}"; do
+            echo "DNS=$dns"
+        done
+    } | sudo tee "$JAIL_ROOT/etc/systemd/network/80-container-host0.network" > /dev/null
+
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" \
+        systemctl enable systemd-networkd dbus systemd-logind >/dev/null 2>&1 || true
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" \
+        systemctl mask systemd-resolved >/dev/null 2>&1 || true
+
+    # --- Instalações como usuário water ---
+    # Cria diretório local/bin e configura npm
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" --user "$USER_NAME" bash -c "
+        mkdir -p /home/$USER_NAME/.local/bin &&
+        npm config set prefix /home/$USER_NAME/.local
+    "
+
+    # oh-my-posh
+    log_info "Instalando oh-my-posh..."
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" --user "$USER_NAME" bash -c "
+        curl -s https://ohmyposh.dev/install.sh | bash -s -- -d /home/$USER_NAME/.local/bin
+    "
+
+    # claude-code
+    log_info "Instalando claude-code..."
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" --user "$USER_NAME" bash -c "
+        npm install -g @anthropic-ai/claude-code
+    "
+
+    # Tema oh-my-posh
+    sudo systemd-nspawn -q -D "$JAIL_ROOT" --user "$USER_NAME" bash -c "
+        mkdir -p /home/$USER_NAME/.config/ohmyposh &&
+        curl -s https://raw.githubusercontent.com/JanDeDobbeleer/oh-my-posh/main/themes/blue-owl.omp.json \
+            -o /home/$USER_NAME/.config/ohmyposh/blue-owl.omp.json
+    "
+
+    # .zshrc (ordem correta: PATH antes do oh-my-posh)
+    sudo tee "$JAIL_ROOT/home/$USER_NAME/.zshrc" > /dev/null <<'EOF'
+HISTFILE=~/.histfile
+HISTSIZE=20000
+SAVEHIST=20000
+
+bindkey '^U' backward-kill-line
+
+export PATH="$HOME/.local/bin:$PATH"
+
+# plugins
+. /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+. /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+. /usr/share/zsh-history-substring-search/zsh-history-substring-search.zsh
+
+eval "$(oh-my-posh init zsh --config /home/water/.config/ohmyposh/blue-owl.omp.json)"
+EOF
+    sudo chown 1000:1000 "$JAIL_ROOT/home/$USER_NAME/.zshrc"
+
+    # tmux.conf
+    sudo tee "$JAIL_ROOT/home/$USER_NAME/.tmux.conf" > /dev/null <<'EOF'
+set -g mouse on
+set -g history-limit 50000
+EOF
+    sudo chown 1000:1000 "$JAIL_ROOT/home/$USER_NAME/.tmux.conf"
+
+    # Git identity (herda do host)
+    local host_git_name host_git_email
+    host_git_name=$(git config --global user.name 2>/dev/null || true)
+    host_git_email=$(git config --global user.email 2>/dev/null || true)
+    if [ -n "$host_git_name" ] || [ -n "$host_git_email" ]; then
+        {
+            echo "[user]"
+            [ -n "$host_git_name" ]  && echo "    name = $host_git_name"
+            [ -n "$host_git_email" ] && echo "    email = $host_git_email"
+        } | sudo tee "$JAIL_ROOT/home/$USER_NAME/.gitconfig" > /dev/null
+        sudo chown 1000:1000 "$JAIL_ROOT/home/$USER_NAME/.gitconfig"
+    fi
+
+    # claude-code settings
+    sudo mkdir -p "$JAIL_ROOT/home/$USER_NAME/.claude"
+    sudo tee "$JAIL_ROOT/home/$USER_NAME/.claude/settings.json" > /dev/null <<'EOF'
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "opus",
+  "effortLevel": "xhigh",
+  "autoMemoryEnabled": true,
+  "skipDangerousModePermissionPrompt": true
+}
+EOF
+    sudo chown -R 1000:1000 "$JAIL_ROOT/home/$USER_NAME/.claude"
+
+    log_success "Debian rootfs pronto em $JAIL_ROOT"
+}
+
+# --- Helpers (idênticos ao original) ---
+is_running() {
+    sudo machinectl show "$MACHINE_NAME" --property=State 2>/dev/null \
+        | grep -q "State=running"
+}
+
+build_bind_args() {
+    local args=()
+    while IFS= read -r host_path || [ -n "$host_path" ]; do
+        [ -z "$host_path" ] && continue
+        if [ ! -d "$host_path" ]; then
+            log_warn "Caminho compartilhado inexistente, ignorando: $host_path" >&2
+            continue
+        fi
+        local folder_name
+        folder_name=$(basename "$host_path")
+        sudo mkdir -p "$JAIL_ROOT$CONTAINER_WORKSPACE/$folder_name"
+        sudo chown 1000:1000 "$JAIL_ROOT$CONTAINER_WORKSPACE/$folder_name"
+        args+=("--bind=$host_path:$CONTAINER_WORKSPACE/$folder_name")
+    done < "$SHARE_LIST"
+    printf '%s\n' "${args[@]}"
+}
+
+container_tmux() {
+    local leader_pid
+    leader_pid=$(sudo machinectl show "$MACHINE_NAME" -p Leader --value 2>/dev/null)
+    [ -n "$leader_pid" ] && [ "$leader_pid" != "0" ] || return 1
+    sudo nsenter --target "$leader_pid" --mount --setuid 1000 --setgid 1000 \
+        env TMUX_TMPDIR=/tmp HOME="/home/$USER_NAME" /usr/bin/tmux "$@"
+}
+
+MENU_CHOICE=0
+choose_menu() {
+    local prompt="$1"; shift
+    local options=("$@")
+    local selected=0 key count=${#options[@]} first=1 i
+
+    printf '\e[?25l' > /dev/tty
+    echo "$prompt" > /dev/tty
+    while true; do
+        [ -z "$first" ] && printf '\e[%dA' "$count" > /dev/tty
+        first=
+        for i in "${!options[@]}"; do
+            if [ "$i" -eq "$selected" ]; then
+                printf '\e[K  \e[36m❯ %s\e[0m\n' "${options[$i]}" > /dev/tty
+            else
+                printf '\e[K    %s\n' "${options[$i]}" > /dev/tty
+            fi
+        done
+        IFS= read -rsn1 key < /dev/tty
+        case "$key" in
+            $'\e')
+                read -rsn2 key < /dev/tty
+                case "$key" in
+                    '[A'|'OA') selected=$(( (selected - 1 + count) % count )) ;;
+                    '[B'|'OB') selected=$(( (selected + 1) % count )) ;;
+                esac ;;
+            k) selected=$(( (selected - 1 + count) % count )) ;;
+            j) selected=$(( (selected + 1) % count )) ;;
+            '') break ;;
+        esac
+    done
+    printf '\e[?25h' > /dev/tty
+    MENU_CHOICE=$selected
+}
+
+attach_session() {
+    local env_args=()
+    [ -n "$ANTHROPIC_API_KEY" ] && env_args+=(-E "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+
+    local sessions=()
+    while IFS= read -r s; do
+        [ -n "$s" ] && sessions+=("$s")
+    done < <(container_tmux list-sessions -F '#{session_name}' 2>/dev/null | sort)
+
+    local target
+    choose_menu "Selecione uma sessão para anexar (↑/↓, Enter):" \
+        "${sessions[@]}" "+ nova sessão"
+    if [ "$MENU_CHOICE" -lt "${#sessions[@]}" ]; then
+        target="${sessions[$MENU_CHOICE]}"
+        log_info "Anexando à sessão '$target'."
+    else
+        target="$TMUX_SESSION"
+        local n=2
+        while printf '%s\n' "${sessions[@]}" | grep -Fxq "$target"; do
+            target="$TMUX_SESSION-$n"; n=$((n + 1))
+        done
+        log_info "Criando nova sessão '$target'."
+    fi
+
+    exec sudo machinectl shell "${env_args[@]}" \
+        "$USER_NAME@$MACHINE_NAME" \
+        /usr/bin/tmux new-session -A -s "$target" -c "$CONTAINER_WORKSPACE"
+}
+
+# --- Rede (idêntico) ---
+configure_host_network() {
+    local tries=30
+    while [ $tries -gt 0 ] && ! ip link show "$VE_IFACE" >/dev/null 2>&1; do
+        sleep 0.2
+        tries=$((tries - 1))
+    done
+    ip link show "$VE_IFACE" >/dev/null 2>&1 \
+        || log_error "Interface $VE_IFACE não apareceu."
+
+    sudo ip addr add "$HOST_IP/$NET_CIDR" dev "$VE_IFACE" 2>/dev/null || true
+    sudo ip link set "$VE_IFACE" up
+
+    sudo sysctl -wq net.ipv4.ip_forward=1
+    sudo sysctl -wq "net.ipv4.conf.$VE_IFACE.route_localnet=1"
+
+    sudo iptables -t nat -C PREROUTING -i "$VE_IFACE" -d "$HOST_IP" -j DNAT --to-destination 127.0.0.1 2>/dev/null \
+        || sudo iptables -t nat -A PREROUTING -i "$VE_IFACE" -d "$HOST_IP" -j DNAT --to-destination 127.0.0.1
+
+    sudo iptables -t nat -C POSTROUTING -s "$HOST_IP/$NET_CIDR" ! -o "$VE_IFACE" -j MASQUERADE 2>/dev/null \
+        || sudo iptables -t nat -A POSTROUTING -s "$HOST_IP/$NET_CIDR" ! -o "$VE_IFACE" -j MASQUERADE
+
+    sudo iptables -C FORWARD -i "$VE_IFACE" -j ACCEPT 2>/dev/null \
+        || sudo iptables -I FORWARD 1 -i "$VE_IFACE" -j ACCEPT
+    sudo iptables -C FORWARD -o "$VE_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+        || sudo iptables -I FORWARD 1 -o "$VE_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+    if [ "$ALLOW_CONTAINER_TO_HOST_PORTS" = "true" ]; then
+        sudo iptables -C INPUT -i "$VE_IFACE" -s "$HOST_IP/$NET_CIDR" -j ACCEPT 2>/dev/null \
+            || sudo iptables -I INPUT 1 -i "$VE_IFACE" -s "$HOST_IP/$NET_CIDR" -j ACCEPT
+    fi
+}
+
+teardown_host_network() {
+    sudo iptables -t nat -D PREROUTING -i "$VE_IFACE" -d "$HOST_IP" -j DNAT --to-destination 127.0.0.1 2>/dev/null || true
+    sudo iptables -t nat -D POSTROUTING -s "$HOST_IP/$NET_CIDR" ! -o "$VE_IFACE" -j MASQUERADE 2>/dev/null || true
+    sudo iptables -D FORWARD -i "$VE_IFACE" -j ACCEPT 2>/dev/null || true
+    sudo iptables -D FORWARD -o "$VE_IFACE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    sudo iptables -D INPUT -i "$VE_IFACE" -s "$HOST_IP/$NET_CIDR" -j ACCEPT 2>/dev/null || true
+}
+
+# --- Ações principais ---
+start_sandbox() {
+    bootstrap_sandbox
+
+    if is_running; then
+        log_info "Waterbox já rodando, anexando..."
+    else
+        log_info "Iniciando container systemd-nspawn..."
+
+        local bind_args=()
+        while IFS= read -r line; do
+            [ -n "$line" ] && bind_args+=("$line")
+        done < <(build_bind_args)
+
+        sudo systemd-run \
+            --unit="$MACHINE_NAME" \
+            --collect \
+            --service-type=notify \
+            --description="Waterbox container ($MACHINE_NAME)" \
+            --property=KillMode=mixed \
+            --property=TimeoutStopSec=30 \
+            --property=SuccessExitStatus=133 \
+            systemd-nspawn \
+                --boot \
+                --quiet \
+                --keep-unit \
+                --notify-ready=yes \
+                --directory="$JAIL_ROOT" \
+                --machine="$MACHINE_NAME" \
+                --network-veth \
+                --resolv-conf=off \
+                --capability=CAP_NET_ADMIN,CAP_NET_RAW \
+                --bind=/dev/net/tun \
+                "${bind_args[@]}"
+
+        is_running || log_error "Falha ao iniciar. journalctl -u $MACHINE_NAME -e"
+        configure_host_network
+        log_success "Waterbox no ar. Host acessível como '$HOST_ALIAS' ($HOST_IP)."
+    fi
+
+    attach_session
+}
+
+stop_sandbox() {
+    if is_running; then
+        log_info "Desligando waterbox..."
+        sudo machinectl poweroff "$MACHINE_NAME" || true
+        local tries=40
+        while [ $tries -gt 0 ] && is_running; do
+            sleep 0.25
+            tries=$((tries - 1))
+        done
+    else
+        log_info "Waterbox não está rodando."
+    fi
+    teardown_host_network
+    log_success "Waterbox parado."
+}
+
+restart_sandbox() {
+    stop_sandbox
+    start_sandbox
+}
+
+status_sandbox() {
+    if is_running; then
+        log_success "Waterbox está rodando."
+        sudo machinectl status "$MACHINE_NAME" --no-pager 2>/dev/null | head -n 12 || true
+    else
+        log_info "Waterbox está parado."
+    fi
+}
+
+reset_sandbox() {
+    log_info "Isso apagará TODO o ambiente waterbox."
+    read -p "Remover $JAIL_ROOT e reconstruir? [y/N]: " confirmation
+    if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+        log_info "Reset abortado."
+        return 0
+    fi
+    if is_running; then
+        sudo machinectl poweroff "$MACHINE_NAME" || true
+        sleep 2
+    fi
+    teardown_host_network
+    sudo rm -rf "$JAIL_ROOT"
+    bootstrap_sandbox
+}
+
+manage_share() {
+    local action="$1"
+    local target_path="$2"
+    [ -z "$target_path" ] && log_error "Caminho faltando. Uso: waterbox share [add|del] <path>"
+
+    local absolute_path
+    absolute_path=$(realpath "$target_path" 2>/dev/null || echo "$target_path")
+    local folder_name
+    folder_name=$(basename "$absolute_path")
+    local mount_target="$CONTAINER_WORKSPACE/$folder_name"
+
+    case "$action" in
+        add)
+            [ -d "$absolute_path" ] || log_error "Diretório inexistente: $absolute_path"
+            if grep -Fxq "$absolute_path" "$SHARE_LIST"; then
+                log_info "'$absolute_path' já está compartilhado."
+                return 0
+            fi
+            echo "$absolute_path" >> "$SHARE_LIST"
+            if is_running; then
+                log_success "Adicionado. Reinicie o waterbox para montar."
+            else
+                log_success "Adicionado (será montado no próximo start)."
+            fi
+            ;;
+        del)
+            if ! grep -Fxq "$absolute_path" "$SHARE_LIST"; then
+                log_error "'$absolute_path' não está compartilhado."
+            fi
+            grep -vFx "$absolute_path" "$SHARE_LIST" > "${SHARE_LIST}.tmp" \
+                && mv "${SHARE_LIST}.tmp" "$SHARE_LIST"
+
+            if is_running; then
+                local leader_pid
+                leader_pid=$(sudo machinectl show "$MACHINE_NAME" -p Leader --value 2>/dev/null)
+                if [ -n "$leader_pid" ] && [ "$leader_pid" != "0" ]; then
+                    sudo nsenter --target "$leader_pid" --mount \
+                        umount -l "$mount_target" 2>/dev/null || true
+                fi
+            fi
+            [ -d "$JAIL_ROOT$mount_target" ] \
+                && sudo rmdir "$JAIL_ROOT$mount_target" 2>/dev/null || true
+            log_success "Removido '$absolute_path'."
+            ;;
+    esac
+}
+
+list_shares() {
+    log_info "Diretórios compartilhados:"
+    if [ ! -s "$SHARE_LIST" ]; then
+        echo "  (nenhum)"
+    else
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "  -> $line  (dentro: $CONTAINER_WORKSPACE/$(basename "$line"))"
+        done < "$SHARE_LIST"
+    fi
+}
+
+# --- Roteamento de argumentos ---
+case "$1" in
+    start|"") start_sandbox ;;
+    stop)    stop_sandbox ;;
+    restart) restart_sandbox ;;
+    status)  status_sandbox ;;
+    reset)   reset_sandbox ;;
+    share)
+        case "$2" in
+            add|del) manage_share "$2" "$3" ;;
+            list)    list_shares ;;
+            *)       log_error "Uso: waterbox share [add|del|list] [path]" ;;
+        esac
+        ;;
+    help|--help|-h) show_help ;;
+    *) log_error "Comando desconhecido '$1'. Veja 'waterbox --help'." ;;
+esac
