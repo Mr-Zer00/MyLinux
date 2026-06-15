@@ -78,7 +78,7 @@ Quando finalizar, você dentro de uma sessão tmux com o prompt [water@box ~/wor
 | waterbox restart | Para e inicia novamente (necessário após share add). |
 | waterbox status | Exibe se o contêiner está ativo. |
 | waterbox reset | Apaga completamente o ambiente e reconstrói do zero. |
-| waterbox share add <caminho> | Compartilha uma pasta do host dentro do workspace do contêiner. |
-| waterbox share del <caminho> | Remove um compartilhamento (ao vivo, sem necessidade de reiniciar). |
+| waterbox share add "path" | Compartilha uma pasta do host dentro do workspace do contêiner. |
+| waterbox share del "path" | Remove um compartilhamento (ao vivo, sem necessidade de reiniciar). |
 | waterbox share list | Lista as pastas atualmente compartilhadas. |
 | waterbox help | Mostra esta ajuda. |
