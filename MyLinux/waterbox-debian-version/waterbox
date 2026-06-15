@@ -6,7 +6,7 @@
 
 set -e
 
-# --- Configuração ---
+# ---Configuração---
 JAIL_ROOT="$HOME/.waterbox/root"
 CONFIG_DIR="$HOME/.waterbox"
 SHARE_LIST="$CONFIG_DIR/shared_paths"
