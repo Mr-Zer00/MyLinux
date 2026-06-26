@@ -130,6 +130,21 @@ EOF
     sudo systemd-nspawn -q -D "$JAIL_ROOT" \
         systemctl mask systemd-resolved >/dev/null 2>&1 || true
 
+    # Persistence for detached tmux sessions. The tmux server is spawned inside
+    # a `machinectl shell` login session and stays in that session's cgroup even
+    # after it daemonizes. When the session closes (you detach with Ctrl-b d),
+    # logind must NOT reap it, or every `waterbox` run starts a fresh session.
+    #   1. KillUserProcesses=no: don't kill leftover user processes on logout.
+    #   2. enable-linger for $USER_NAME: start user@1000.service at boot and keep
+    #      the user's processes alive independent of any login session.
+    # Arch's logind defaults already happen to keep the server alive; Debian's
+    # build does not, so we pin both explicitly here for parity.
+    sudo mkdir -p "$JAIL_ROOT/etc/systemd/logind.conf.d"
+    printf '[Login]\nKillUserProcesses=no\n' \
+        | sudo tee "$JAIL_ROOT/etc/systemd/logind.conf.d/10-waterbox.conf" > /dev/null
+    sudo mkdir -p "$JAIL_ROOT/var/lib/systemd/linger"
+    sudo touch "$JAIL_ROOT/var/lib/systemd/linger/$USER_NAME"
+
     # --- Instalações como usuário water ---
     # Cria diretório local/bin e configura npm
     sudo systemd-nspawn -q -D "$JAIL_ROOT" --user "$USER_NAME" bash -c "
